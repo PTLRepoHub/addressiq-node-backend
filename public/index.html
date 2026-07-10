@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AddressIQ — Server-minted IQCollect demo</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0d12; color: #cdd6df;
+      margin: 0; padding: 32px; line-height: 1.5;
+    }
+    .wrap { max-width: 680px; margin: 0 auto; }
+    h1 { color: #fff; margin-bottom: 4px; }
+    p { color: #9aa6b2; margin-top: 0; }
+    code { background: #1c2330; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+    .note {
+      background: #14233a; border: 1px solid #234; border-left: 4px solid #4a90e2;
+      border-radius: 8px; padding: 12px 16px; margin: 20px 0; color: #b8c7d9; font-size: 0.92em;
+    }
+    .form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 20px 0; }
+    .form label { display: flex; flex-direction: column; font-size: 0.85em; color: #9aa6b2; gap: 4px; }
+    .form input {
+      background: #1c2330; border: 1px solid #2a3445; border-radius: 6px;
+      padding: 8px 10px; color: #cdd6df; font-size: 0.95em;
+    }
+    button {
+      background: #4a90e2; color: #fff; border: 0; border-radius: 8px;
+      padding: 12px 20px; font-size: 1em; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #iqcollect-mount {
+      background: #1c2330; border-radius: 12px; padding: 16px; min-height: 200px; margin-top: 20px;
+    }
+    #status { margin-top: 16px; font-size: 0.92em; white-space: pre-wrap; }
+    .ok { color: #5cd6a0; }
+    .err { color: #ef6f6f; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AddressIQ IQCollect — paired demo</h1>
+    <p>The server mints a session; this page mounts IQCollect with the minted token.</p>
+
+    <div class="note">
+      <strong>apiKey lives only on the server.</strong> The browser collects the
+      address (<code>locationCode</code>); digital VERIFICATION runs on the mobile SDK
+      via <code>startVerification({ locationCode })</code> — browsers return
+      <code>BROWSER_VERIFICATION_NOT_SUPPORTED</code>.
+    </div>
+
+    <div class="form">
+      <label>First name<input id="firstName" value="Ada" /></label>
+      <label>Last name<input id="lastName" value="Lovelace" /></label>
+      <label>Phone<input id="phone" value="+2348012345678" /></label>
+      <label>Email<input id="email" value="ada@example.com" /></label>
+    </div>
+
+    <button id="collectBtn">Collect Address</button>
+
+    <div id="status"></div>
+    <div id="iqcollect-mount"></div>
+  </div>
+
+  <!-- Browser SDK via CDN UMD → window.AddressIQ.IQCollect -->
+  <script src="https://cdn.addressiq.com/v0.1.0/iqcollect.js" crossorigin="anonymous"></script>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const btn = document.getElementById('collectBtn');
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className = cls || '';
+    }
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      setStatus('Minting session on the server…');
+
+      try {
+        // 1. Ask OUR backend to mint a session. The apiKey never leaves the server.
+        const resp = await fetch('/api/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: document.getElementById('phone').value,
+            firstName: document.getElementById('firstName').value,
+            lastName: document.getElementById('lastName').value,
+            email: document.getElementById('email').value,
+          }),
+        });
+
+        const session = await resp.json();
+        if (!resp.ok) throw new Error(session.error || ('HTTP ' + resp.status));
+
+        setStatus('Session minted (' + (session.sessionId || 'ok') + '). Mounting IQCollect…', 'ok');
+
+        // 2. Mount IQCollect with the SERVER-MINTED session token (not a raw key).
+        const collector = new window.AddressIQ.IQCollect(
+          document.getElementById('iqcollect-mount'),
+          {
+            apiKey: session.sessionToken,                      // server-minted, short-lived
+            appUserId: session.appUserId || 'cust_web_demo',
+            apiUrl: session.apiUrl,
+            theme: 'dark',
+            onAddressSelected: (address) => {
+              setStatus(
+                'Address collected.\n' +
+                'locationCode: ' + address.locationCode + '\n\n' +
+                'Next step: digital verification runs on the MOBILE SDK via ' +
+                'startVerification({ locationCode: "' + address.locationCode + '" }). ' +
+                'Browsers cannot verify — they return BROWSER_VERIFICATION_NOT_SUPPORTED.',
+                'ok'
+              );
+            },
+            onError: (err) => {
+              setStatus('IQCollect error: ' + (err && err.message ? err.message : String(err)), 'err');
+            },
+            onClose: () => {
+              btn.disabled = false;
+            },
+          }
+        );
+
+        collector.open();
+      } catch (err) {
+        setStatus('Could not start collection: ' + err.message, 'err');
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

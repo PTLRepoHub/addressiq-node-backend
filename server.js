@@ -2,10 +2,80 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static('public'));
+
+// ── Local mock upstream (MOCK_UPSTREAM=1) ──
+// Serves the `/api/v1/*` paths the IQCollect web widget calls directly, so the
+// full flow (session → list addresses → start-verification → collect) runs with
+// zero dependency on api.addressiqpro.com. Toggle the address-book branches via
+// `hasSavedAddresses` in mock-fixtures.json.
+const MOCK_UPSTREAM = process.env.MOCK_UPSTREAM === '1';
+const FIXTURES_PATH = path.join(__dirname, 'mock-fixtures.json');
+
+function loadFixtures() {
+  try {
+    return JSON.parse(fs.readFileSync(FIXTURES_PATH, 'utf8'));
+  } catch (err) {
+    console.warn(`[Mock] Could not read fixtures (${err.message}); using empty defaults.`);
+    return { hasSavedAddresses: false, savedAddresses: [], business: {} };
+  }
+}
+
+function mockId(prefix) {
+  return `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+if (MOCK_UPSTREAM) {
+  // Session create — mirrors POST /api/v1/widget/sessions/create.
+  app.post('/api/v1/widget/sessions/create', (req, res) => {
+    const { phone, email } = req.body || {};
+    console.log(`[Mock] Session create for ${phone || email || 'anon'}`);
+    res.json({ sessionId: mockId('sess'), sessionToken: mockId('tok') });
+  });
+
+  // Business branding for the tenant behind the API key (NEW — the widget reads
+  // its business identity here rather than the integrator hardcoding it).
+  app.get('/api/v1/widget/config', (req, res) => {
+    const fx = loadFixtures();
+    console.log(`[Mock] Widget config → business "${(fx.business || {}).displayName || '(unset)'}"`);
+    res.json({ business: fx.business || {}, googleMapsApiKey: GOOGLE_MAPS_API_KEY || undefined });
+  });
+
+  // List a user's saved addresses across businesses (NEW — address book source).
+  app.get('/api/v1/locations', (req, res) => {
+    const fx = loadFixtures();
+    const addresses = fx.hasSavedAddresses ? (fx.savedAddresses || []) : [];
+    console.log(`[Mock] List addresses for ${req.query.appUserId || 'anon'} → ${addresses.length}`);
+    res.json({ addresses, business: fx.business || {} });
+  });
+
+  // Start verification for an EXISTING address (NEW — address-book "Verify").
+  app.post('/api/v1/verifications/start', (req, res) => {
+    const { locationCode, appUserId } = req.body || {};
+    if (!locationCode) return res.status(400).json({ code: 'MISSING_LOCATION_CODE', message: 'locationCode is required' });
+    const verificationId = mockId('ver');
+    console.log(`[Mock] Start verification ${verificationId} for ${locationCode} (${appUserId || 'anon'})`);
+    console.log(`[Mock] would-send-email → verification "${verificationId}" started for ${locationCode}`);
+    res.json({ verificationId, locationCode, status: 'PENDING' });
+  });
+
+  // Collect a NEW address, then implicitly start its verification.
+  app.post('/api/v1/locations/collect', (req, res) => {
+    const locationCode = mockId('LOC');
+    const verificationId = mockId('ver');
+    console.log(`[Mock] Collect new address → ${locationCode}`);
+    console.log(`[Mock] would-send-email → verification "${verificationId}" started for ${locationCode}`);
+    res.json({ locationCode, verificationId, status: 'PENDING' });
+  });
+
+  console.log('[Mock] MOCK_UPSTREAM=1 — serving canned /api/v1/* responses from mock-fixtures.json');
+}
 
 // Environment-based URL configuration
 const ENVIRONMENT_URLS = {
@@ -28,6 +98,10 @@ const envUrls = ENVIRONMENT_URLS[ENV] || ENVIRONMENT_URLS.staging;
 const API_URL = process.env.ADDRESSIQ_API_URL || envUrls.apiUrl;
 const INGEST_URL = process.env.ADDRESSIQ_INGEST_URL || envUrls.ingestUrl;
 const API_KEY = process.env.ADDRESSIQ_API_KEY || 'fsp_test_hE2DIQASZmuWS7cU9l1MyhZcmmXG1Rfw';
+// Client-side Google Maps key for the demo widget's address map. Read from
+// .env (gitignored) so it isn't committed. Empty → the map degrades to manual
+// address entry.
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '66850035a4e0866156e4bd95e7468c4a455afdfe183f17d4fb53a50d21a0980d';
 const PORT = process.env.PORT || 3333;
 
@@ -51,7 +125,41 @@ async function addressiqFetch(url, options = {}) {
   return data;
 }
 
+// ── Live widget proxy (when MOCK_UPSTREAM is off) ──
+// Forwards the IQCollect widget's `/api/v1/*` calls to the configured upstream
+// (ENVIRONMENT=local → localhost:4000, staging, or production) using the
+// server-side API key. This is the "connect to the real API" path: run the
+// backend WITHOUT MOCK_UPSTREAM and point the widget's apiUrl at this server.
+if (!MOCK_UPSTREAM) {
+  app.all('/api/v1/*', async (req, res) => {
+    const target = `${API_URL}${req.originalUrl}`;
+    try {
+      const init = { method: req.method, headers: { 'x-api-key': API_KEY } };
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(req.body || {});
+      }
+      const upstream = await fetch(target, init);
+      const body = await upstream.text();
+      const ct = upstream.headers.get('content-type');
+      if (ct) res.set('content-type', ct);
+      console.log(`[Proxy] ${req.method} ${req.originalUrl} → ${API_URL} (${upstream.status})`);
+      res.status(upstream.status).send(body);
+    } catch (err) {
+      console.error(`[Proxy] ${req.method} ${req.originalUrl} → ${API_URL} failed:`, err.message);
+      res.status(502).json({ code: 'UPSTREAM_UNREACHABLE', message: err.message });
+    }
+  });
+  console.log(`[Proxy] Live mode — forwarding /api/v1/* → ${API_URL} with server API key`);
+}
+
 // ── Routes ──
+
+// Demo-only config the local.html harness reads at startup (e.g. the Google
+// Maps key). Keeps keys out of the committed example HTML.
+app.get('/api/demo/config', (_req, res) => {
+  res.json({ googleMapsApiKey: GOOGLE_MAPS_API_KEY });
+});
 
 // 1. Create a widget session (server-to-server)
 app.post('/api/session', async (req, res) => {
@@ -105,7 +213,7 @@ app.post('/api/submit-address', async (req, res) => {
     const data = await submitRes.json();
     if (!submitRes.ok) throw new Error(data.message || `HTTP ${submitRes.status}`);
 
-    console.log(`[Address] Verification started: ${data.verificationId}`);
+    console.log(`[Address] Verification started: ${data.verificationCode}`);
     res.json(data);
   } catch (err) {
     console.error('[Address] Error:', err.message);
@@ -213,7 +321,7 @@ app.post('/api/simulate/:verificationId', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n  AddressIQ Demo Backend`);
   console.log(`  ─────────────────────────`);
-  console.log(`  Env:       ${ENV}`);
+  console.log(`  Env:       ${ENV}${MOCK_UPSTREAM ? ' (MOCK_UPSTREAM)' : ''}`);
   console.log(`  Server:    http://localhost:${PORT}`);
   console.log(`  API:       ${API_URL}`);
   console.log(`  Ingest:    ${INGEST_URL}`);

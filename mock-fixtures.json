@@ -1,0 +1,23 @@
+{
+  "_comment": "Seed data for MOCK_UPSTREAM=1. Flip `hasSavedAddresses` to test the two address-book branches: true renders the address book, false falls straight through to the collect flow.",
+  "hasSavedAddresses": true,
+  "business": {
+    "displayName": "Kuda Business",
+    "logoUrl": "",
+    "primaryColor": "#5a2d9c"
+  },
+  "savedAddresses": [
+    {
+      "locationCode": "LOC-DEMO-0001",
+      "formattedAddress": "Belham estar, 4a, Abuja Municipal, Federal Capital Territory, Nigeria",
+      "lat": 9.0765,
+      "lon": 7.3986
+    },
+    {
+      "locationCode": "LOC-DEMO-0002",
+      "formattedAddress": "4a, belham estate karsana, Abuja Municipal, Federal Capital Territory, Nigeria",
+      "lat": 9.1123,
+      "lon": 7.4001
+    }
+  ]
+}
